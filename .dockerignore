@@ -1,0 +1,30 @@
+# Ignore Python virtual environments
+venv/
+env/
+
+# Ignore outputs, checkpoints, logs, temp files
+output/
+checkpoints/
+logs/
+*.log
+*.tmp
+
+# Ignore Python cache and compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore Git files
+.git
+.gitignore
+
+# Ignore system files
+.DS_Store
+Thumbs.db
+
+# Ignore large data/model files (if you download them locally)
+*.pt
+*.bin
+*.tar
+*.zip

@@ -1,0 +1,16 @@
+# Web Server
+fastapi
+uvicorn
+python-multipart
+
+# AI & Deep Learning
+torch
+torchvision
+transformers
+accelerate
+bitsandbytes
+qwen-vl-utils
+
+# Image Processing & Speed
+Pillow
+hf_transfer
