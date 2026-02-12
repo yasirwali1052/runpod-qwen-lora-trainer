@@ -1,0 +1,30 @@
+# Python virtual environment
+venv/
+env/
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Logs and outputs
+logs/
+data/output/
+*.log
+*.tmp
+
+# Configs with secrets
+config.json
+
+# Ignore data folder
+data/
+
+# Docker files you don’t need in Git (optional)
+*.tar
+*.zip
+
+# System files
+.DS_Store
+Thumbs.db
+
