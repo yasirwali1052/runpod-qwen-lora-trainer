@@ -2,12 +2,11 @@ import torch
 from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
 from qwen_vl_utils import process_vision_info
 from PIL import Image
+import json
 import re
 import os
-import json
 
 MODEL_NAME = "unsloth/Qwen2-VL-7B-Instruct-bnb-4bit"
-ELEMENTS_PER_IMAGE = 10
 
 class QwenProcessor:
     def __init__(self):
@@ -27,6 +26,7 @@ class QwenProcessor:
         with Image.open(image_path) as img:
             orig_width, orig_height = img.size
 
+        # NEW PROMPT - asks for structured output
         messages = [
             {
                 "role": "user",
@@ -34,17 +34,20 @@ class QwenProcessor:
                     {"type": "image", "image": f"file://{image_path}"},
                     {
                         "type": "text",
-                        "text": """Analyze this UI screenshot carefully. Identify 10 distinct interactive elements (buttons, links, inputs, icons, etc.).
+                        "text": """You are a UI element detector. Analyze this screenshot and identify up to 10 distinct UI elements.
 
-For each element, provide in this exact format:
+For EACH element you detect, provide:
+1. Element type: button, link, input, text, image, icon, dropdown, checkbox, or menu
+2. Bounding box in format: <box>[[x1,y1,x2,y2]]</box> where coordinates are 0-1000
+3. Visible text on the element (if any)
+4. Brief visual description (color, shape, style)
 
-Element N:
-- Type: [button/link/input/icon/text/image/dropdown/checkbox]
-- Position: <box>[[x1,y1,x2,y2]]</box>
-- Text: "[exact text visible on element]"
-- Description: [color, shape, style details]
+Format each element like this:
+Element 1: [type] <box>[[x1,y1,x2,y2]]</box>
+Text: "actual text here"
+Description: brief visual description
 
-Be precise with coordinates. Don't repeat the same element twice."""
+Be accurate. Only detect elements you can clearly see. Do not invent elements."""
                     }
                 ]
             }
@@ -79,7 +82,9 @@ Be precise with coordinates. Don't repeat the same element twice."""
             clean_up_tokenization_spaces=False
         )[0]
         
-        elements = self._parse_response(response, orig_width, orig_height)
+        print(f"\n=== MODEL RESPONSE ===\n{response}\n===================\n")
+        
+        elements = self._parse_response_v2(response, orig_width, orig_height)
         
         return {
             "image_filename": os.path.basename(image_path),
@@ -88,39 +93,47 @@ Be precise with coordinates. Don't repeat the same element twice."""
             "model": MODEL_NAME
         }
     
-    def _parse_response(self, response, img_w, img_h):
+    def _parse_response_v2(self, response, img_w, img_h):
+        """Better parsing that handles varied model outputs"""
         elements = []
         
         # Extract all bounding boxes
         box_pattern = r'<box>\[\[(\d+),(\d+),(\d+),(\d+)\]\]</box>'
         boxes = re.findall(box_pattern, response)
         
-        # Split response by "Element" to get individual element blocks
-        element_blocks = re.split(r'Element \d+:', response)[1:]  # Skip first empty split
+        if not boxes:
+            print("WARNING: No bounding boxes found in response")
+            return self._empty_elements()
         
-        for i, box in enumerate(boxes[:ELEMENTS_PER_IMAGE]):
+        # Split response into sections by "Element"
+        element_sections = re.split(r'Element \d+:', response)
+        element_sections = [s.strip() for s in element_sections if s.strip()]
+        
+        for i, box in enumerate(boxes[:10]):
             x1, y1, x2, y2 = map(int, box)
             
-            # Convert from 1000-scale to actual pixel coordinates
+            # Convert from 1000-scale to actual pixels
             real_x1 = int(x1 * img_w / 1000)
             real_y1 = int(y1 * img_h / 1000)
             real_x2 = int(x2 * img_w / 1000)
             real_y2 = int(y2 * img_h / 1000)
             
-            # Get the corresponding element block
-            block_text = element_blocks[i] if i < len(element_blocks) else ""
+            # Get context for this element
+            context = element_sections[i] if i < len(element_sections) else ""
             
             # Extract element type
-            element_type = self._extract_type(block_text)
+            element_type = self._extract_type(context)
             
-            # Extract text content
-            text_content = self._extract_text_content(block_text)
+            # Extract text
+            text_match = re.search(r'Text:\s*["\']?([^"\'\n]+)["\']?', context, re.IGNORECASE)
+            element_text = text_match.group(1).strip() if text_match else ""
             
             # Extract description
-            description = self._extract_description(block_text)
+            desc_match = re.search(r'Description:\s*(.+?)(?:\n|$)', context, re.IGNORECASE)
+            description = desc_match.group(1).strip() if desc_match else context[:200]
             
             # Extract colors
-            colors = self._extract_colors(block_text)
+            colors = self._extract_colors(context)
             
             element = {
                 "element_type": element_type,
@@ -130,90 +143,70 @@ Be precise with coordinates. Don't repeat the same element twice."""
                     "width": real_x2 - real_x1,
                     "height": real_y2 - real_y1
                 },
-                "text": text_content,
+                "text": element_text,
                 "description": description,
                 "color_palette": colors,
                 "confidence": round(0.70 + (i * 0.02), 2)
             }
             elements.append(element)
         
-        # Pad with empty elements if needed
-        while len(elements) < ELEMENTS_PER_IMAGE:
-            elements.append({
-                "element_type": "unknown",
-                "bounding_box": {"x": 0, "y": 0, "width": 0, "height": 0},
-                "text": "",
-                "description": "Not detected",
-                "color_palette": [],
-                "confidence": 0.0
-            })
+        # Pad to 10 elements
+        while len(elements) < 10:
+            elements.append(self._empty_element())
         
-        return elements[:ELEMENTS_PER_IMAGE]
-
-    def _extract_type(self, block):
-        """Extract element type from block"""
-        type_match = re.search(r'Type:\s*\[?([^\]\n]+)\]?', block, re.IGNORECASE)
-        if type_match:
-            element_type = type_match.group(1).strip().lower()
-            # Map to standard types
-            if 'button' in element_type or 'btn' in element_type:
-                return 'button'
-            elif 'link' in element_type or 'anchor' in element_type:
-                return 'link'
-            elif 'input' in element_type or 'field' in element_type:
-                return 'input'
-            elif 'icon' in element_type:
-                return 'icon'
-            elif 'image' in element_type or 'img' in element_type:
-                return 'image'
-            elif 'text' in element_type or 'label' in element_type:
-                return 'text'
-            elif 'dropdown' in element_type or 'select' in element_type:
-                return 'dropdown'
-            elif 'checkbox' in element_type or 'check' in element_type:
-                return 'checkbox'
-            return element_type
-        return 'button'
+        return elements[:10]
     
-    def _extract_text_content(self, block):
-        """Extract text content from block"""
-        text_match = re.search(r'Text:\s*["\']([^"\']+)["\']', block, re.IGNORECASE)
-        if text_match:
-            return text_match.group(1).strip()
+    def _extract_type(self, context):
+        """Extract element type from context"""
+        context_lower = context.lower()
         
-        # Alternative pattern
-        text_match = re.search(r'Text:\s*\[([^\]]+)\]', block, re.IGNORECASE)
-        if text_match:
-            return text_match.group(1).strip()
+        type_keywords = {
+            'button': ['button', 'btn'],
+            'link': ['link', 'anchor', 'href'],
+            'input': ['input', 'textbox', 'field', 'search bar'],
+            'text': ['text', 'label', 'heading', 'paragraph'],
+            'image': ['image', 'img', 'logo', 'icon'],
+            'dropdown': ['dropdown', 'select'],
+            'checkbox': ['checkbox', 'check'],
+            'menu': ['menu', 'navigation']
+        }
         
-        return ""
+        for etype, keywords in type_keywords.items():
+            if any(kw in context_lower for kw in keywords):
+                return etype
+        
+        # Default based on first word
+        first_line = context.split('\n')[0].lower()
+        for etype in type_keywords.keys():
+            if etype in first_line:
+                return etype
+        
+        return "unknown"
     
-    def _extract_description(self, block):
-        """Extract description from block"""
-        desc_match = re.search(r'Description:\s*\[?([^\]\n]{10,200})\]?', block, re.IGNORECASE)
-        if desc_match:
-            return desc_match.group(1).strip()
-        
-        # Fallback: get text after Description:
-        if 'Description:' in block:
-            parts = block.split('Description:')
-            if len(parts) > 1:
-                desc = parts[1].strip().split('\n')[0][:200]
-                return desc
-        
-        return "UI element"
-    
-    def _extract_colors(self, block):
-        """Extract colors from block"""
-        colors = ['red', 'blue', 'green', 'yellow', 'white', 'black', 'gray', 'grey',
-                  'orange', 'purple', 'pink', 'brown', 'cyan', 'teal']
+    def _extract_colors(self, context):
+        """Extract colors from context"""
+        colors = ['red', 'blue', 'green', 'yellow', 'white', 'black', 
+                 'gray', 'orange', 'purple', 'pink', 'brown']
         found = []
-        block_lower = block.lower()
+        context_lower = context.lower()
         
         for color in colors:
-            if color in block_lower and color not in found:
+            if color in context_lower and color not in found:
                 found.append(color)
-                if len(found) >= 3:
-                    break
         
-        return found if found else ["gray"]
+        return found[:3] if found else ["white", "black"]
+    
+    def _empty_element(self):
+        """Return a properly formatted empty element"""
+        return {
+            "element_type": "unknown",
+            "bounding_box": {"x": 0, "y": 0, "width": 0, "height": 0},
+            "text": "",
+            "description": "Not detected",
+            "color_palette": [],
+            "confidence": 0.0
+        }
+    
+    def _empty_elements(self):
+        """Return 10 empty elements"""
+        return [self._empty_element() for _ in range(10)]
