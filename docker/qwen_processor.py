@@ -15,7 +15,7 @@ class QwenProcessor:
             MODEL_NAME,
             device_map="auto",
             trust_remote_code=True,
-            torch_dtype=torch.float16
+            torch_dtype=torch.bfloat16
         )
         
         self.processor = AutoProcessor.from_pretrained(
