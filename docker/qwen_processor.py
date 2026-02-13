@@ -33,7 +33,7 @@ class QwenProcessor:
                     {"type": "image", "image": f"file://{image_path}"},
                     {
                         "type": "text",
-                        "text": f"""Analyze this screenshot and identify exactly {ELEMENTS_PER_IMAGE} distinct, interactive UI elements.
+                        "text": f"""Analyze this screenshot and identify AT LEAST {ELEMENTS_PER_IMAGE} distinct UI elements visible on the page.
 
 For EACH element provide these 5 fields in order:
 1. Type: button|link|input|text|image|icon|menu|header|navigation|search
@@ -43,9 +43,11 @@ For EACH element provide these 5 fields in order:
 5. Colors: List 1-3 main colors (e.g., blue, white, red)
 
 IMPORTANT:
-- Focus on interactive elements (buttons, links, inputs) users can click or type into
-- Avoid listing page backgrounds or decorative elements multiple times
-- The Purpose should be a functional description, not just repeating the text
+- Include ALL interactive elements (buttons, links, inputs, menus)
+- Include important text blocks, headings, and images
+- Include navigation items, logos, icons
+- You can include page sections if there aren't enough interactive elements
+- List at least {ELEMENTS_PER_IMAGE} elements even if some are decorative
 - List elements from top-left to bottom-right of the page
 
 Example format:
@@ -78,7 +80,7 @@ Colors: blue, white"""
         with torch.no_grad():
             output_ids = self.model.generate(
                 **inputs,
-                max_new_tokens=2048,
+                max_new_tokens=3072,  # Increased to allow more elements
                 do_sample=False
             )
         
@@ -180,63 +182,58 @@ Colors: blue, white"""
             # EXTRACT DESCRIPTION
             description = "UI element"
             
-            # Remove type/text markers and quotes to get pure description
-            desc_text = context_clean
+            # The model outputs in format like:
+            # "Type: button Position: <box>... Text: "..." Purpose: Does something 2."
+            # We need to extract the Purpose part and remove the trailing number
             
-            # Remove structured labels (Type:, Text:, Position:, Colors:, Purpose:, etc.)
-            desc_text = re.sub(r'\*\*[Tt]ype\*\*:\s*\w+', '', desc_text)
-            desc_text = re.sub(r'Type:\s*\w+', '', desc_text, flags=re.IGNORECASE)
-            desc_text = re.sub(r'\*\*[Tt]ext\*\*:\s*[""\'"`].*?[""\'"`]', '', desc_text)
-            desc_text = re.sub(r'Text:\s*[""\'"`].*?[""\'"`]', '', desc_text, flags=re.IGNORECASE)
-            desc_text = re.sub(r'\*\*[Pp]osition\*\*:.*?(?=\*\*|$)', '', desc_text)
-            desc_text = re.sub(r'Position:.*?(?=Type:|Text:|Colors:|Purpose:|$)', '', desc_text, flags=re.IGNORECASE)
-            desc_text = re.sub(r'\*\*[Cc]olors?\*\*:.*?(?=\*\*|$)', '', desc_text)
-            desc_text = re.sub(r'Colors?:.*?(?=Type:|Text:|Purpose:|$|\d+)', '', desc_text, flags=re.IGNORECASE)
-            desc_text = re.sub(r'\*\*[Pp]urpose\*\*:', 'Purpose:', desc_text)  # Keep Purpose: marker
+            # First, remove ALL numbered item markers at the start (1. 2. 3. etc)
+            context_clean = re.sub(r'^\s*\d+\.\s*', '', context_clean)
             
-            # Remove any **Label**: patterns we haven't caught yet
-            desc_text = re.sub(r'\*\*[^*]+\*\*:', '', desc_text)
-            
-            # Remove all quoted strings (already extracted as text)
-            desc_text = re.sub(r'[""\'"`][^""\'"`]{0,200}[""\'"`]', '', desc_text)
-            
-            # Clean up numbers at start (from numbering: "1. Element" -> "Element")
-            desc_text = re.sub(r'^\s*\d+\.?\s*', '', desc_text)
-            
-            # Clean whitespace
-            desc_text = ' '.join(desc_text.split()).strip()
-            
-            # Look for "Purpose:" specifically as it usually has the best description
-            purpose_match = re.search(r'Purpose:\s*(.+?)(?:\s+Type:|Text:|Colors?:|Position:|$)', desc_text, re.IGNORECASE)
+            # Look for "Purpose:" field specifically
+            purpose_match = re.search(r'[Pp]urpose:\s*(.+?)(?:\s+\d+\s*$|\s*$)', context_clean, re.IGNORECASE)
             if purpose_match:
                 description = purpose_match.group(1).strip()
-                # Clean up trailing period/comma
-                description = description.rstrip('.,').strip()
             else:
-                # Get first meaningful sentence (at least 20 chars)
-                sentences = re.split(r'[.!?]\s+', desc_text)
-                for sent in sentences:
-                    sent = sent.strip()
-                    if len(sent) >= 20:
-                        # Avoid meta-descriptions about the format
-                        skip_phrases = ['bounding box', 'type:', 'text:', 'visible text', 
-                                       'here is', 'the element', 'this is a', 'coordinates',
-                                       'position:', 'colors:', 'color palette']
-                        if not any(phrase in sent.lower() for phrase in skip_phrases):
-                            description = sent[:200]
-                            break
+                # Fallback: Try to find description after removing structured fields
+                desc_text = context_clean
                 
-                # If still no good description, use cleaned snippet
-                if description == "UI element" and len(desc_text) > 15:
-                    # Take first reasonable chunk
-                    description = desc_text[:200].rstrip('.,').strip()
+                # Remove all structured labels
+                desc_text = re.sub(r'[Tt]ype:\s*\w+', '', desc_text)
+                desc_text = re.sub(r'[Pp]osition:\s*<box>.*?</box>', '', desc_text)
+                desc_text = re.sub(r'[Tt]ext:\s*[""\'"`].*?[""\'"`]', '', desc_text)
+                desc_text = re.sub(r'[Cc]olors?:\s*[^.]+', '', desc_text)
+                desc_text = re.sub(r'<box>.*?</box>', '', desc_text)
+                
+                # Remove all quoted strings
+                desc_text = re.sub(r'[""\'"`][^""\'"`]*[""\'"`]', '', desc_text)
+                
+                # Clean whitespace
+                desc_text = ' '.join(desc_text.split()).strip()
+                
+                # Get first meaningful sentence
+                if len(desc_text) >= 15:
+                    sentences = re.split(r'[.!?]\s+', desc_text)
+                    for sent in sentences:
+                        sent = sent.strip()
+                        if len(sent) >= 15:
+                            skip_phrases = ['bounding box', 'coordinates', 'position']
+                            if not any(phrase in sent.lower() for phrase in skip_phrases):
+                                description = sent
+                                break
+                
+                if description == "UI element" and len(desc_text) > 10:
+                    description = desc_text[:200]
             
-            # Final cleanup
+            # CRITICAL: Remove trailing numbers (the model adds "2.", "3.", etc at the end)
+            # Remove patterns like: " 2.", " 3.", " 10.", " 2", " 3", etc
+            description = re.sub(r'\s+\d+\.?\s*$', '', description)
+            description = description.strip()
+            
+            # Capitalize and add period
             if description and description != "UI element":
-                # Capitalize first letter
-                description = description[0].upper() + description[1:] if len(description) > 1 else description
-                # Ensure it ends properly
-                if not description[-1] in '.!?':
+                if len(description) > 0:
+                    description = description[0].upper() + description[1:] if len(description) > 1 else description.upper()
+                if description and not description[-1] in '.!?':
                     description = description + '.'
             
             # EXTRACT COLORS
@@ -254,23 +251,27 @@ Colors: blue, white"""
             
             # QUALITY CHECKS - Filter out bad elements
             
-            # Check if this is a duplicate background element
+            # Check if this is a duplicate full-page background element
             element_area = (real_x2 - real_x1) * (real_y2 - real_y1)
             total_area = img_w * img_h
-            is_fullscreen = element_area >= total_area * 0.85  # 85% or more of screen
+            is_nearly_fullscreen = element_area >= total_area * 0.90  # 90% or more of screen
             
-            background_keywords = ['background', 'gradient', 'main background', 
-                                  'the page', 'entire page', 'full page']
-            is_background_desc = any(term in description.lower() for term in background_keywords)
+            background_keywords = ['main background', 'entire page', 'full page', 
+                                  'the page with a gradient', 'background of the page']
+            is_generic_background = any(term in description.lower() for term in background_keywords)
             
-            # Skip duplicate backgrounds (keep first one only)
-            if is_fullscreen and is_background_desc and len(elements) >= 3:
-                print(f"  [{i+1}] SKIPPED - duplicate background element")
+            # Only skip if it's BOTH nearly fullscreen AND generic background AND we already have one
+            if is_nearly_fullscreen and is_generic_background and any(
+                e.get('element_type') == 'main' and 
+                e.get('bounding_box', {}).get('width', 0) * e.get('bounding_box', {}).get('height', 0) >= total_area * 0.85
+                for e in elements
+            ):
+                print(f"  [{i+1}] SKIPPED - duplicate full-page background")
                 continue
             
-            # Skip exact duplicate bounding boxes
+            # Skip exact duplicate bounding boxes only
             if box_sig in seen_boxes:
-                print(f"  [{i+1}] SKIPPED - duplicate bounding box")
+                print(f"  [{i+1}] SKIPPED - exact duplicate position")
                 continue
             
             seen_boxes.add(box_sig)
@@ -311,6 +312,56 @@ Colors: blue, white"""
         
         print(f"\n✓ Parsed {len([e for e in elements if e['element_type'] != 'unknown'])} valid elements")
         
+        # If we still don't have enough elements, try to extract from any remaining text
+        if len(elements) < ELEMENTS_PER_IMAGE:
+            print(f"⚠ Only found {len(elements)} elements, looking for more in raw response...")
+            
+            # Try to find any remaining text descriptions that might be elements
+            # Look for patterns like numbered lists without boxes
+            remaining_items = re.findall(r'\d+\.\s+([^0-9][^\n]{20,150})', response)
+            for item in remaining_items[:ELEMENTS_PER_IMAGE - len(elements)]:
+                # Skip if it looks like it was already processed
+                if any(item[:30] in str(e.get('description', ''))[:50] for e in elements):
+                    continue
+                
+                # Extract any text in quotes
+                text_match = re.search(r'[""\'"`]([^""\'"`]{2,50})[""\'"`]', item)
+                text_content = text_match.group(1) if text_match else ""
+                
+                # Try to determine type from keywords
+                item_lower = item.lower()
+                elem_type = "unknown"
+                if 'button' in item_lower or 'click' in item_lower:
+                    elem_type = "button"
+                elif 'link' in item_lower or 'navigate' in item_lower:
+                    elem_type = "link"
+                elif 'input' in item_lower or 'enter' in item_lower:
+                    elem_type = "input"
+                elif 'text' in item_lower or 'heading' in item_lower:
+                    elem_type = "text"
+                elif 'image' in item_lower or 'icon' in item_lower:
+                    elem_type = "image"
+                
+                # Clean description
+                desc = re.sub(r'[""\'"`][^""\'"`]*[""\'"`]', '', item)
+                desc = re.sub(r'\s+\d+\.?\s*$', '', desc)
+                desc = desc.strip()
+                
+                if len(desc) > 10:
+                    elements.append({
+                        "element_type": elem_type,
+                        "bounding_box": {"x": 0, "y": 0, "width": 50, "height": 50},  # Placeholder
+                        "text": text_content,
+                        "description": desc[:200] + '.',
+                        "color_palette": [],
+                        "confidence": 0.5
+                    })
+                    print(f"  [+] Recovered element: {elem_type} - {desc[:40]}")
+        
+        # Fill remaining slots with empty elements
+        while len(elements) < ELEMENTS_PER_IMAGE:
+            elements.append(self._empty_element())
+        
         return elements[:ELEMENTS_PER_IMAGE]
     
     def _empty_element(self):
@@ -322,4 +373,3 @@ Colors: blue, white"""
             "color_palette": [],
             "confidence": 0.0
         }
-
