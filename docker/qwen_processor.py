@@ -33,7 +33,7 @@ class QwenProcessor:
                     {"type": "image", "image": f"file://{image_path}"},
                     {
                         "type": "text",
-                        "text": f"Describe all UI elements in this image. For each, give: type (button/link/input/text/image), bounding box <box>[[x1,y1,x2,y2]]</box>, and any visible text. Detect {ELEMENTS_PER_IMAGE} elements."
+                        "text": f"List {ELEMENTS_PER_IMAGE} UI elements. For each provide: Type, bounding box <box>[[x,y,x2,y2]]</box>, visible text in quotes, brief description, and colors."
                     }
                 ]
             }
@@ -68,15 +68,13 @@ class QwenProcessor:
             clean_up_tokenization_spaces=False
         )[0]
         
-        # Extract just the assistant's response
         if "assistant" in response:
             response = response.split("assistant")[-1].strip()
         
-        print(f"\n{'='*60}\nMODEL OUTPUT:\n{response}\n{'='*60}\n")
+        print(f"\n{'='*60}\nMODEL RAW OUTPUT:\n{response}\n{'='*60}\n")
         
         elements = self._parse_response(response, orig_width, orig_height)
         
-        # REMOVED: raw_response and model from output
         return {
             "image_filename": os.path.basename(image_path),
             "total_elements": len(elements),
@@ -84,114 +82,83 @@ class QwenProcessor:
         }
     
     def _parse_response(self, response, img_w, img_h):
-        """Parse model response and extract elements - CLEANED VERSION"""
+        """COMPLETELY REWRITTEN PARSER"""
         elements = []
         
-        # Allow spaces in coordinates
+        # Find all boxes
         box_pattern = r'<box>\[\[(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\]\]</box>'
         boxes = re.findall(box_pattern, response)
         
         if not boxes:
-            print(f"WARNING: No bounding boxes detected")
+            print("❌ NO BOXES FOUND")
             return [self._empty_element() for _ in range(ELEMENTS_PER_IMAGE)]
         
-        print(f"✓ Found {len(boxes)} bounding boxes")
+        print(f"✓ Found {len(boxes)} boxes")
         
-        # Split response into numbered sections
-        element_sections = re.split(r'\n\d+\.\s+', response)
-        element_sections = [s.strip() for s in element_sections if s.strip()]
+        # Split by numbered items (1. 2. 3. etc)
+        sections = re.split(r'\n\s*\d+\.\s+', response)
+        sections = [s.strip() for s in sections if s.strip()]
         
         for i, box in enumerate(boxes[:ELEMENTS_PER_IMAGE]):
             x1, y1, x2, y2 = map(int, box)
             
-            # Scale to actual image size
+            # Scale coordinates
             real_x1 = int(x1 * img_w / 1000)
             real_y1 = int(y1 * img_h / 1000)
             real_x2 = int(x2 * img_w / 1000)
             real_y2 = int(y2 * img_h / 1000)
             
-            # Get context for this element
-            context = ""
-            if i < len(element_sections):
-                context = element_sections[i]
-            else:
-                # Fallback: find text near this box
-                box_str = f"[[{x1}, {y1}, {x2}, {y2}]]"
-                box_index = response.find(box_str)
-                if box_index != -1:
-                    start = max(0, box_index - 100)
-                    end = min(len(response), box_index + 300)
-                    context = response[start:end]
+            # Get text for this element
+            context = sections[i] if i < len(sections) else ""
             
-            # CLEAN: Remove bounding box from context
-            context = re.sub(r'<box>\[\[[\d\s,]+\]\]</box>', '', context)
-            # CLEAN: Remove "Bounding Box:" lines
-            context = re.sub(r'\*\*Bounding Box\*\*:[^\n]*', '', context)
-            # CLEAN: Remove intro text from first element
-            context = re.sub(r'Here is (?:the )?description.*?:', '', context, flags=re.IGNORECASE)
+            # Remove box coords from context
+            context_clean = re.sub(r'<box>.*?</box>', '', context)
             
-            # Extract element type
+            # EXTRACT TYPE
             elem_type = "unknown"
-            context_lower = context.lower()
-            type_patterns = [
-                r'\*\*Type\*\*:\s*(\w+)',
-                r'Type:\s*(\w+)',
-                r'-\s*Type:\s*(\w+)'
-            ]
-            for pattern in type_patterns:
-                type_match = re.search(pattern, context, re.IGNORECASE)
-                if type_match:
-                    elem_type = type_match.group(1).lower()
+            # Look for patterns like: **Type**: button OR Type: button OR just "button" at start
+            type_match = re.search(r'(?:\*\*)?[Tt]ype(?:\*\*)?:\s*(\w+)', context_clean)
+            if type_match:
+                elem_type = type_match.group(1).lower()
+            else:
+                # Fallback: check first word
+                first_word = context_clean.split()[0].lower() if context_clean.split() else ""
+                if first_word in ['button', 'link', 'input', 'text', 'image', 'icon', 'menu']:
+                    elem_type = first_word
+            
+            # EXTRACT TEXT - look for ANY quoted text
+            text_content = ""
+            # Pattern 1: "text here" or 'text here'
+            quote_matches = re.findall(r'["\']([^"\']{2,100})["\']', context_clean)
+            if quote_matches:
+                # Get longest match (usually the actual text)
+                text_content = max(quote_matches, key=len)
+            
+            # EXTRACT DESCRIPTION - get clean sentence
+            description = "UI element"
+            # Remove type/text/box lines
+            desc_clean = re.sub(r'\*\*[Tt]ype\*\*:.*', '', context_clean)
+            desc_clean = re.sub(r'\*\*[Tt]ext\*\*:.*', '', desc_clean)
+            desc_clean = re.sub(r'\*\*.*?\*\*:', '', desc_clean)  # Remove all **Label**:
+            desc_clean = desc_clean.strip()
+            
+            # Get first meaningful sentence
+            sentences = re.split(r'[.!]\s+', desc_clean)
+            for sent in sentences:
+                sent = sent.strip()
+                if len(sent) > 15 and not any(x in sent.lower() for x in ['here is', 'bounding', 'type:', 'text:']):
+                    description = sent[:200]
                     break
             
-            # Fallback: detect type from keywords
-            if elem_type == "unknown":
-                for t in ['button', 'link', 'input', 'text', 'image', 'icon', 'checkbox', 'dropdown', 'menu']:
-                    if f'**{t}' in context_lower or f'type: {t}' in context_lower:
-                        elem_type = t
-                        break
-            
-            # Extract text content
-            text_content = ""
-            text_patterns = [
-                r'\*\*Text\*\*:\s*["\']([^"\']+)["\']',
-                r'Text:\s*["\']([^"\']+)["\']',
-                r'["\']([^"\']{3,80})["\']'  # Any quoted text
-            ]
-            for pattern in text_patterns:
-                text_match = re.search(pattern, context)
-                if text_match:
-                    text_content = text_match.group(1).strip()
-                    # Skip generic/intro text
-                    if not any(skip in text_content.lower() for skip in ['here is', 'description', 'bounding box', 'type:']):
-                        break
-                    else:
-                        text_content = ""
-            
-            # Get clean description
-            description = "UI element"
-            # Remove type and text lines, keep actual description
-            desc_lines = context.split('\n')
-            for line in desc_lines:
-                line = line.strip()
-                # Skip lines with Type, Text, Bounding Box
-                if any(skip in line for skip in ['**Type**', 'Type:', '**Text**', 'Text:', '**Bounding', 'Bounding Box']):
-                    continue
-                # Skip empty or very short lines
-                if len(line) < 10:
-                    continue
-                # Skip intro lines
-                if any(skip in line.lower() for skip in ['here is', 'description of', 'ui element']):
-                    continue
-                # Found a good description
-                description = line[:200]
-                break
-            
-            # Extract colors
+            # EXTRACT COLORS - find actual color words
             colors = []
-            for color in ['red', 'blue', 'green', 'yellow', 'white', 'black', 'gray', 'orange', 'purple', 'pink']:
+            color_words = ['red', 'blue', 'green', 'yellow', 'orange', 'purple', 'pink', 'white', 'black', 'gray', 'grey', 'brown']
+            context_lower = context_clean.lower()
+            for color in color_words:
                 if color in context_lower and color not in colors:
                     colors.append(color)
+                    if len(colors) >= 3:
+                        break
             
             element = {
                 "element_type": elem_type,
@@ -203,13 +170,13 @@ class QwenProcessor:
                 },
                 "text": text_content,
                 "description": description,
-                "color_palette": colors[:3] if colors else ["white", "black"],
+                "color_palette": colors if colors else [],
                 "confidence": round(0.70 + (i * 0.01), 2)
             }
             elements.append(element)
-            print(f"  Element {i+1}: {elem_type} - '{text_content}' - {description[:50]}")
+            
+            print(f"  [{i+1}] {elem_type:8s} | '{text_content[:30]:30s}' | {description[:40]:40s} | {colors}")
         
-        # Pad to ELEMENTS_PER_IMAGE
         while len(elements) < ELEMENTS_PER_IMAGE:
             elements.append(self._empty_element())
         
