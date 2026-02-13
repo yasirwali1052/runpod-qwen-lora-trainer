@@ -2,7 +2,6 @@ import torch
 from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
 from qwen_vl_utils import process_vision_info
 from PIL import Image
-import json
 import re
 import os
 
@@ -26,7 +25,7 @@ class QwenProcessor:
         with Image.open(image_path) as img:
             orig_width, orig_height = img.size
 
-        # NEW PROMPT - asks for structured output
+        # Simple, direct prompt
         messages = [
             {
                 "role": "user",
@@ -34,45 +33,43 @@ class QwenProcessor:
                     {"type": "image", "image": f"file://{image_path}"},
                     {
                         "type": "text",
-                        "text": """You are a UI element detector. Analyze this screenshot and identify up to 10 distinct UI elements.
-
-For EACH element you detect, provide:
-1. Element type: button, link, input, text, image, icon, dropdown, checkbox, or menu
-2. Bounding box in format: <box>[[x1,y1,x2,y2]]</box> where coordinates are 0-1000
-3. Visible text on the element (if any)
-4. Brief visual description (color, shape, style)
-
-Format each element like this:
-Element 1: [type] <box>[[x1,y1,x2,y2]]</box>
-Text: "actual text here"
-Description: brief visual description
-
-Be accurate. Only detect elements you can clearly see. Do not invent elements."""
+                        "text": "Describe the UI elements you see in this screenshot. For each element, specify its type (button, link, input, text, image, icon), provide bounding box coordinates as <box>[[x1,y1,x2,y2]]</box>, and describe what it shows or says."
                     }
                 ]
             }
         ]
         
-        text = self.processor.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True
-        )
-        
+        # Process vision info
         image_inputs, video_inputs = process_vision_info(messages)
         
+        # Create inputs WITHOUT chat template
         inputs = self.processor(
-            text=[text],
+            text=None,
             images=image_inputs,
             videos=video_inputs,
             padding=True,
             return_tensors="pt"
-        ).to(self.model.device)
+        )
+        
+        # Add the text prompt separately
+        prompt_text = "Describe the UI elements you see in this screenshot. For each element, specify its type (button, link, input, text, image, icon), provide bounding box coordinates as <box>[[x1,y1,x2,y2]]</box>, and describe what it shows or says."
+        
+        text_inputs = self.processor.tokenizer(
+            prompt_text,
+            return_tensors="pt",
+            padding=True
+        )
+        
+        # Combine inputs
+        inputs['input_ids'] = text_inputs['input_ids'].to(self.model.device)
+        inputs['attention_mask'] = text_inputs['attention_mask'].to(self.model.device)
+        inputs['pixel_values'] = inputs['pixel_values'].to(self.model.device)
+        inputs['image_grid_thw'] = inputs['image_grid_thw'].to(self.model.device)
         
         with torch.no_grad():
             output_ids = self.model.generate(
                 **inputs,
-                max_new_tokens=2048,
+                max_new_tokens=1024,
                 do_sample=False
             )
         
@@ -82,122 +79,97 @@ Be accurate. Only detect elements you can clearly see. Do not invent elements.""
             clean_up_tokenization_spaces=False
         )[0]
         
-        print(f"\n=== MODEL RESPONSE ===\n{response}\n===================\n")
+        print(f"\n{'='*60}\nMODEL RAW OUTPUT:\n{response}\n{'='*60}\n")
         
-        elements = self._parse_response_v2(response, orig_width, orig_height)
+        elements = self._parse_response(response, orig_width, orig_height)
         
         return {
             "image_filename": os.path.basename(image_path),
             "total_elements": len(elements),
             "elements": elements,
-            "model": MODEL_NAME
+            "model": MODEL_NAME,
+            "raw_response": response[:500]  # Include snippet for debugging
         }
     
-    def _parse_response_v2(self, response, img_w, img_h):
-        """Better parsing that handles varied model outputs"""
+    def _parse_response(self, response, img_w, img_h):
+        """Parse model response and extract elements"""
         elements = []
         
-        # Extract all bounding boxes
+        # Find all bounding boxes
         box_pattern = r'<box>\[\[(\d+),(\d+),(\d+),(\d+)\]\]</box>'
         boxes = re.findall(box_pattern, response)
         
         if not boxes:
-            print("WARNING: No bounding boxes found in response")
-            return self._empty_elements()
+            print("WARNING: No bounding boxes detected")
+            return [self._empty_element() for _ in range(10)]
         
-        # Split response into sections by "Element"
-        element_sections = re.split(r'Element \d+:', response)
-        element_sections = [s.strip() for s in element_sections if s.strip()]
+        # Split by common separators
+        parts = re.split(r'\n+|\d+\.|Element \d+:', response)
+        parts = [p.strip() for p in parts if len(p.strip()) > 20]
         
         for i, box in enumerate(boxes[:10]):
             x1, y1, x2, y2 = map(int, box)
             
-            # Convert from 1000-scale to actual pixels
+            # Scale to actual image size
             real_x1 = int(x1 * img_w / 1000)
             real_y1 = int(y1 * img_h / 1000)
             real_x2 = int(x2 * img_w / 1000)
             real_y2 = int(y2 * img_h / 1000)
             
-            # Get context for this element
-            context = element_sections[i] if i < len(element_sections) else ""
+            # Get surrounding context
+            context = parts[i] if i < len(parts) else ""
             
-            # Extract element type
-            element_type = self._extract_type(context)
+            # Extract type
+            elem_type = "unknown"
+            for t in ['button', 'link', 'input', 'text', 'image', 'icon', 'checkbox', 'dropdown']:
+                if t in context.lower():
+                    elem_type = t
+                    break
             
-            # Extract text
-            text_match = re.search(r'Text:\s*["\']?([^"\'\n]+)["\']?', context, re.IGNORECASE)
-            element_text = text_match.group(1).strip() if text_match else ""
+            # Extract text content
+            text_content = ""
+            # Look for quoted text
+            quotes = re.findall(r'["\']([^"\']+)["\']', context)
+            if quotes:
+                text_content = quotes[0]
+            else:
+                # Look for "Text:" or "says:" patterns
+                text_match = re.search(r'(?:text|says|labeled|shows):\s*(.+?)(?:\.|,|\n|$)', context, re.IGNORECASE)
+                if text_match:
+                    text_content = text_match.group(1).strip()
             
-            # Extract description
-            desc_match = re.search(r'Description:\s*(.+?)(?:\n|$)', context, re.IGNORECASE)
-            description = desc_match.group(1).strip() if desc_match else context[:200]
+            # Get description (first sentence)
+            sentences = re.split(r'[.!?]\s+', context)
+            description = sentences[0][:200] if sentences else "UI element"
             
             # Extract colors
-            colors = self._extract_colors(context)
+            colors = []
+            for color in ['red', 'blue', 'green', 'yellow', 'white', 'black', 'gray', 'orange', 'purple']:
+                if color in context.lower():
+                    colors.append(color)
             
             element = {
-                "element_type": element_type,
+                "element_type": elem_type,
                 "bounding_box": {
                     "x": real_x1,
                     "y": real_y1,
                     "width": real_x2 - real_x1,
                     "height": real_y2 - real_y1
                 },
-                "text": element_text,
+                "text": text_content,
                 "description": description,
-                "color_palette": colors,
+                "color_palette": colors[:3] if colors else ["white", "black"],
                 "confidence": round(0.70 + (i * 0.02), 2)
             }
             elements.append(element)
         
-        # Pad to 10 elements
+        # Pad to 10
         while len(elements) < 10:
             elements.append(self._empty_element())
         
         return elements[:10]
     
-    def _extract_type(self, context):
-        """Extract element type from context"""
-        context_lower = context.lower()
-        
-        type_keywords = {
-            'button': ['button', 'btn'],
-            'link': ['link', 'anchor', 'href'],
-            'input': ['input', 'textbox', 'field', 'search bar'],
-            'text': ['text', 'label', 'heading', 'paragraph'],
-            'image': ['image', 'img', 'logo', 'icon'],
-            'dropdown': ['dropdown', 'select'],
-            'checkbox': ['checkbox', 'check'],
-            'menu': ['menu', 'navigation']
-        }
-        
-        for etype, keywords in type_keywords.items():
-            if any(kw in context_lower for kw in keywords):
-                return etype
-        
-        # Default based on first word
-        first_line = context.split('\n')[0].lower()
-        for etype in type_keywords.keys():
-            if etype in first_line:
-                return etype
-        
-        return "unknown"
-    
-    def _extract_colors(self, context):
-        """Extract colors from context"""
-        colors = ['red', 'blue', 'green', 'yellow', 'white', 'black', 
-                 'gray', 'orange', 'purple', 'pink', 'brown']
-        found = []
-        context_lower = context.lower()
-        
-        for color in colors:
-            if color in context_lower and color not in found:
-                found.append(color)
-        
-        return found[:3] if found else ["white", "black"]
-    
     def _empty_element(self):
-        """Return a properly formatted empty element"""
         return {
             "element_type": "unknown",
             "bounding_box": {"x": 0, "y": 0, "width": 0, "height": 0},
@@ -206,7 +178,3 @@ Be accurate. Only detect elements you can clearly see. Do not invent elements.""
             "color_palette": [],
             "confidence": 0.0
         }
-    
-    def _empty_elements(self):
-        """Return 10 empty elements"""
-        return [self._empty_element() for _ in range(10)]
