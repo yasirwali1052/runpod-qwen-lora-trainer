@@ -112,11 +112,11 @@ def get_pod_endpoint(api_key, pod_id):
     if not pod or not pod.get('runtime') or not pod['runtime'].get('ports'):
         return None
     
+    # Try to build proxy URL from pod_id
     for port in pod['runtime']['ports']:
-        if port['privatePort'] == 8000 and port.get('publicPort'):
-            ip = port.get('ip', '')
-            public_port = port.get('publicPort')
-            return f"http://{ip}:{public_port}"
+        if port['privatePort'] == 8000:
+            # RunPod proxy format: https://{pod_id}-{port}.proxy.runpod.net
+            return f"https://{pod_id}-8000.proxy.runpod.net"
     
     return None
 
@@ -137,62 +137,6 @@ def terminate_pod(api_key, pod_id):
     else:
         log(f"Terminated pod {pod_id}")
         print(f"Pod terminated: {pod_id}")
-
-def process_images_on_pod(api_key, pod_id):
-    endpoint = get_pod_endpoint(api_key, pod_id)
-    
-    if not endpoint:
-        print("Pod API endpoint not ready")
-        return
-    
-    input_folder = "data/input"
-    output_folder = "data/output"
-    
-    os.makedirs(output_folder, exist_ok=True)
-    
-    image_files = [
-        f for f in os.listdir(input_folder)
-        if f.lower().endswith(('.png', '.jpg', '.jpeg'))
-    ]
-    
-    if not image_files:
-        print("No images in data/input/")
-        return
-    
-    print(f"Processing {len(image_files)} images via {endpoint}")
-    
-    for i, img_file in enumerate(image_files, 1):
-        img_path = os.path.join(input_folder, img_file)
-        
-        print(f"[{i}/{len(image_files)}] {img_file}")
-        
-        try:
-            with open(img_path, 'rb') as f:
-                response = requests.post(
-                    f"{endpoint}/process",
-                    files={'image': (img_file, f, 'image/png')},
-                    timeout=120
-                )
-            
-            if response.status_code == 200:
-                result = response.json()
-                
-                output_file = os.path.join(
-                    output_folder,
-                    f"{os.path.splitext(img_file)[0]}.json"
-                )
-                
-                with open(output_file, 'w') as f:
-                    json.dump(result, f, indent=2)
-                
-                print(f"   Saved: {output_file}")
-            else:
-                print(f"   Error: {response.status_code}")
-        
-        except Exception as e:
-            print(f"   Failed: {str(e)}")
-    
-    print(f"\nResults saved in {output_folder}/")
 
 def main():
     config = load_config()
@@ -257,8 +201,56 @@ def main():
                 print()
         
         elif choice == "3":
-            pod_id = input("Enter Pod ID: ")
-            process_images_on_pod(api_key, pod_id)
+            pod_id = input("Enter Pod ID: ").strip()
+            endpoint = input("Enter endpoint URL (or press Enter to auto-detect): ").strip()
+            
+            if not endpoint:
+                endpoint = get_pod_endpoint(api_key, pod_id)
+            
+            if not endpoint:
+                print("Pod API endpoint not ready")
+                continue
+            
+            input_folder = "data/input"
+            output_folder = "data/output"
+            
+            os.makedirs(output_folder, exist_ok=True)
+            
+            image_files = [
+                f for f in os.listdir(input_folder)
+                if f.lower().endswith(('.png', '.jpg', '.jpeg'))
+            ]
+            
+            if not image_files:
+                print("No images in data/input/")
+                continue
+            
+            print(f"Processing {len(image_files)} images via {endpoint}")
+            
+            for i, img_file in enumerate(image_files, 1):
+                img_path = os.path.join(input_folder, img_file)
+                print(f"[{i}/{len(image_files)}] {img_file}")
+                
+                try:
+                    with open(img_path, 'rb') as f:
+                        response = requests.post(
+                            f"{endpoint}/process",
+                            files={'image': (img_file, f, 'image/png')},
+                            timeout=120
+                        )
+                    
+                    if response.status_code == 200:
+                        result = response.json()
+                        output_file = os.path.join(output_folder, f"{os.path.splitext(img_file)[0]}.json")
+                        with open(output_file, 'w') as f:
+                            json.dump(result, f, indent=2)
+                        print(f"   Saved: {output_file}")
+                    else:
+                        print(f"   Error: {response.status_code}")
+                except Exception as e:
+                    print(f"   Failed: {str(e)}")
+            
+            print(f"\nResults saved in {output_folder}/")
         
         elif choice == "4":
             pod_id = input("Enter Pod ID: ")
