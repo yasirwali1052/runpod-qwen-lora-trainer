@@ -18,6 +18,20 @@ gpu_lock = threading.Lock()
 INPUT_FOLDER = "/workspace/input"
 OUTPUT_FOLDER = "/workspace/output"
 
+@app.get("/")
+async def root():
+    return {
+        "status": "running",
+        "message": "Qwen Vision API",
+        "version": "1.0.0",
+        "endpoints": {
+            "POST /process": "Process single image",
+            "POST /process-folder": "Process all images in input folder",
+            "GET /health": "Health check with VRAM stats",
+            "GET /results": "Get all processed results"
+        }
+    }
+
 @app.on_event("startup")
 async def startup():
     global processor
