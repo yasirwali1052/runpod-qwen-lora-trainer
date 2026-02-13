@@ -323,19 +323,3 @@ Colors: blue, white"""
             "confidence": 0.0
         }
 
-
-# Example usage
-if __name__ == "__main__":
-    import json
-    
-    processor = QwenProcessor()
-    
-    # Process an image
-    result = processor.process_image("screenshot_014.png")
-    
-    # Save result
-    with open("output_fixed.json", "w") as f:
-        json.dump(result, f, indent=2)
-    
-    print(f"\n✓ Saved results to output_fixed.json")
-    print(f"✓ Found {result['total_elements']} elements")
