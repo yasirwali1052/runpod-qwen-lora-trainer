@@ -59,7 +59,6 @@ class QwenProcessor:
             output_ids = self.model.generate(
                 **inputs,
                 max_new_tokens=2048,
-                temperature=0.1,
                 do_sample=False
             )
         
