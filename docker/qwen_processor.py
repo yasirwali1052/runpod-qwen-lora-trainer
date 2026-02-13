@@ -25,7 +25,6 @@ class QwenProcessor:
         with Image.open(image_path) as img:
             orig_width, orig_height = img.size
 
-        # Simple, direct prompt
         messages = [
             {
                 "role": "user",
@@ -33,38 +32,28 @@ class QwenProcessor:
                     {"type": "image", "image": f"file://{image_path}"},
                     {
                         "type": "text",
-                        "text": "Describe the UI elements you see in this screenshot. For each element, specify its type (button, link, input, text, image, icon), provide bounding box coordinates as <box>[[x1,y1,x2,y2]]</box>, and describe what it shows or says."
+                        "text": "Describe all UI elements in this image. For each, give: type (button/link/input/text/image), bounding box <box>[[x1,y1,x2,y2]]</box>, and any visible text."
                     }
                 ]
             }
         ]
         
-        # Process vision info
+        # Use the proper Qwen2-VL processing
+        text = self.processor.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True
+        )
+        
         image_inputs, video_inputs = process_vision_info(messages)
         
-        # Create inputs WITHOUT chat template
         inputs = self.processor(
-            text=None,
+            text=[text],
             images=image_inputs,
             videos=video_inputs,
             padding=True,
             return_tensors="pt"
-        )
-        
-        # Add the text prompt separately
-        prompt_text = "Describe the UI elements you see in this screenshot. For each element, specify its type (button, link, input, text, image, icon), provide bounding box coordinates as <box>[[x1,y1,x2,y2]]</box>, and describe what it shows or says."
-        
-        text_inputs = self.processor.tokenizer(
-            prompt_text,
-            return_tensors="pt",
-            padding=True
-        )
-        
-        # Combine inputs
-        inputs['input_ids'] = text_inputs['input_ids'].to(self.model.device)
-        inputs['attention_mask'] = text_inputs['attention_mask'].to(self.model.device)
-        inputs['pixel_values'] = inputs['pixel_values'].to(self.model.device)
-        inputs['image_grid_thw'] = inputs['image_grid_thw'].to(self.model.device)
+        ).to(self.model.device)
         
         with torch.no_grad():
             output_ids = self.model.generate(
@@ -79,7 +68,11 @@ class QwenProcessor:
             clean_up_tokenization_spaces=False
         )[0]
         
-        print(f"\n{'='*60}\nMODEL RAW OUTPUT:\n{response}\n{'='*60}\n")
+        # Extract just the assistant's response (after the prompt)
+        if "assistant" in response:
+            response = response.split("assistant")[-1].strip()
+        
+        print(f"\n{'='*60}\nMODEL OUTPUT:\n{response}\n{'='*60}\n")
         
         elements = self._parse_response(response, orig_width, orig_height)
         
@@ -88,7 +81,7 @@ class QwenProcessor:
             "total_elements": len(elements),
             "elements": elements,
             "model": MODEL_NAME,
-            "raw_response": response[:500]  # Include snippet for debugging
+            "raw_response": response[:500]
         }
     
     def _parse_response(self, response, img_w, img_h):
