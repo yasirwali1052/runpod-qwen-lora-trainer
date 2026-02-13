@@ -4,6 +4,7 @@ from qwen_vl_utils import process_vision_info
 from PIL import Image
 import re
 import os
+import json
 
 MODEL_NAME = "unsloth/Qwen2-VL-7B-Instruct-bnb-4bit"
 ELEMENTS_PER_IMAGE = 10
@@ -14,7 +15,7 @@ class QwenProcessor:
             MODEL_NAME,
             device_map="auto",
             trust_remote_code=True,
-            torch_dtype=torch.bfloat16  # ← FIXED: Changed from float16 to bfloat16
+            torch_dtype=torch.float16
         )
         
         self.processor = AutoProcessor.from_pretrained(
@@ -33,7 +34,17 @@ class QwenProcessor:
                     {"type": "image", "image": f"file://{image_path}"},
                     {
                         "type": "text",
-                        "text": "Detect UI elements in this screenshot. For each element, provide: element type (button/link/input/image/text/icon/dropdown/checkbox/menu/header), bounding box <box>[[x1,y1,x2,y2]]</box>, text content, visual description with colors and styling, typography details. Detect 10 elements."
+                        "text": """Analyze this UI screenshot carefully. Identify 10 distinct interactive elements (buttons, links, inputs, icons, etc.).
+
+For each element, provide in this exact format:
+
+Element N:
+- Type: [button/link/input/icon/text/image/dropdown/checkbox]
+- Position: <box>[[x1,y1,x2,y2]]</box>
+- Text: "[exact text visible on element]"
+- Description: [color, shape, style details]
+
+Be precise with coordinates. Don't repeat the same element twice."""
                     }
                 ]
             }
@@ -79,125 +90,130 @@ class QwenProcessor:
     
     def _parse_response(self, response, img_w, img_h):
         elements = []
+        
+        # Extract all bounding boxes
         box_pattern = r'<box>\[\[(\d+),(\d+),(\d+),(\d+)\]\]</box>'
         boxes = re.findall(box_pattern, response)
         
-        response_parts = re.split(box_pattern, response)
-        
-        element_types = {
-            'button': ['button', 'btn', 'submit', 'click'],
-            'link': ['link', 'href', 'anchor'],
-            'input': ['input', 'field', 'textbox', 'form'],
-            'image': ['image', 'img', 'photo'],
-            'text': ['text', 'label', 'paragraph'],
-            'icon': ['icon', 'symbol'],
-            'dropdown': ['dropdown', 'select'],
-            'checkbox': ['checkbox', 'check'],
-            'menu': ['menu', 'nav'],
-            'header': ['header', 'title']
-        }
+        # Split response by "Element" to get individual element blocks
+        element_blocks = re.split(r'Element \d+:', response)[1:]  # Skip first empty split
         
         for i, box in enumerate(boxes[:ELEMENTS_PER_IMAGE]):
             x1, y1, x2, y2 = map(int, box)
             
+            # Convert from 1000-scale to actual pixel coordinates
             real_x1 = int(x1 * img_w / 1000)
             real_y1 = int(y1 * img_h / 1000)
             real_x2 = int(x2 * img_w / 1000)
             real_y2 = int(y2 * img_h / 1000)
-
-            context_start = max(0, i * 5 - 2)
-            context_end = min(len(response_parts), (i + 1) * 5 + 2)
-            context = ' '.join(response_parts[context_start:context_end])
+            
+            # Get the corresponding element block
+            block_text = element_blocks[i] if i < len(element_blocks) else ""
+            
+            # Extract element type
+            element_type = self._extract_type(block_text)
+            
+            # Extract text content
+            text_content = self._extract_text_content(block_text)
+            
+            # Extract description
+            description = self._extract_description(block_text)
+            
+            # Extract colors
+            colors = self._extract_colors(block_text)
             
             element = {
-                "element_type": self._classify_element(context, element_types),
+                "element_type": element_type,
                 "bounding_box": {
                     "x": real_x1,
                     "y": real_y1,
                     "width": real_x2 - real_x1,
                     "height": real_y2 - real_y1
                 },
-                "description": self._extract_text(context),
-                "visual_style": self._extract_visual_style(context),
-                "color_palette": self._extract_colors(context),
-                "typography": self._extract_typography(context),
-                "confidence": round(min(0.95, 0.70 + (i * 0.025)), 2)
+                "text": text_content,
+                "description": description,
+                "color_palette": colors,
+                "confidence": round(0.70 + (i * 0.02), 2)
             }
             elements.append(element)
         
+        # Pad with empty elements if needed
         while len(elements) < ELEMENTS_PER_IMAGE:
             elements.append({
-                "element_type": "text",
+                "element_type": "unknown",
                 "bounding_box": {"x": 0, "y": 0, "width": 0, "height": 0},
+                "text": "",
                 "description": "Not detected",
-                "visual_style": "N/A",
                 "color_palette": [],
-                "typography": "N/A",
                 "confidence": 0.0
             })
         
         return elements[:ELEMENTS_PER_IMAGE]
 
-    def _classify_element(self, context, element_types):
-        context_lower = context.lower()
-        for etype, keywords in element_types.items():
-            if any(kw in context_lower for kw in keywords):
-                return etype
-        return "button"
-
-    def _extract_text(self, context):
-        quote_pattern = r'["\']([^"\']{1,100})["\']'
-        matches = re.findall(quote_pattern, context)
-        if matches:
-            return matches[0].strip()
-        
-        keywords = ['says', 'reads', 'labeled', 'text:', 'content:']
-        for kw in keywords:
-            if kw in context.lower():
-                parts = context.split(kw)
-                if len(parts) > 1:
-                    return parts[1].strip().split('.')[0][:100]
-        
-        return "UI Element"
+    def _extract_type(self, block):
+        """Extract element type from block"""
+        type_match = re.search(r'Type:\s*\[?([^\]\n]+)\]?', block, re.IGNORECASE)
+        if type_match:
+            element_type = type_match.group(1).strip().lower()
+            # Map to standard types
+            if 'button' in element_type or 'btn' in element_type:
+                return 'button'
+            elif 'link' in element_type or 'anchor' in element_type:
+                return 'link'
+            elif 'input' in element_type or 'field' in element_type:
+                return 'input'
+            elif 'icon' in element_type:
+                return 'icon'
+            elif 'image' in element_type or 'img' in element_type:
+                return 'image'
+            elif 'text' in element_type or 'label' in element_type:
+                return 'text'
+            elif 'dropdown' in element_type or 'select' in element_type:
+                return 'dropdown'
+            elif 'checkbox' in element_type or 'check' in element_type:
+                return 'checkbox'
+            return element_type
+        return 'button'
     
-    def _extract_colors(self, context):
-        colors = ['red', 'blue', 'green', 'yellow', 'white', 'black', 'gray', 'orange', 'purple', 'pink']
+    def _extract_text_content(self, block):
+        """Extract text content from block"""
+        text_match = re.search(r'Text:\s*["\']([^"\']+)["\']', block, re.IGNORECASE)
+        if text_match:
+            return text_match.group(1).strip()
+        
+        # Alternative pattern
+        text_match = re.search(r'Text:\s*\[([^\]]+)\]', block, re.IGNORECASE)
+        if text_match:
+            return text_match.group(1).strip()
+        
+        return ""
+    
+    def _extract_description(self, block):
+        """Extract description from block"""
+        desc_match = re.search(r'Description:\s*\[?([^\]\n]{10,200})\]?', block, re.IGNORECASE)
+        if desc_match:
+            return desc_match.group(1).strip()
+        
+        # Fallback: get text after Description:
+        if 'Description:' in block:
+            parts = block.split('Description:')
+            if len(parts) > 1:
+                desc = parts[1].strip().split('\n')[0][:200]
+                return desc
+        
+        return "UI element"
+    
+    def _extract_colors(self, block):
+        """Extract colors from block"""
+        colors = ['red', 'blue', 'green', 'yellow', 'white', 'black', 'gray', 'grey',
+                  'orange', 'purple', 'pink', 'brown', 'cyan', 'teal']
         found = []
-        context_lower = context.lower()
+        block_lower = block.lower()
         
         for color in colors:
-            if color in context_lower and color not in found:
+            if color in block_lower and color not in found:
                 found.append(color)
+                if len(found) >= 3:
+                    break
         
-        return found[:3] if found else ["gray", "white"]
-    
-    def _extract_typography(self, context):
-        descriptors = []
-        context_lower = context.lower()
-        
-        if 'bold' in context_lower:
-            descriptors.append('bold')
-        if 'italic' in context_lower:
-            descriptors.append('italic')
-        if 'sans-serif' in context_lower:
-            descriptors.append('sans-serif')
-        elif 'serif' in context_lower:
-            descriptors.append('serif')
-        
-        size_match = re.search(r'(\d+)\s*px', context_lower)
-        if size_match:
-            descriptors.append(f"{size_match.group(1)}px")
-        else:
-            descriptors.append('14px')
-        
-        return ' '.join(descriptors) if descriptors else "Regular 14px"
-    
-    def _extract_visual_style(self, context):
-        sentences = [s.strip() for s in context.split('.') if len(s.strip()) > 10]
-        keywords = ['color', 'background', 'border', 'rounded', 'shadow', 'style']
-        
-        for sentence in sentences:
-            if any(kw in sentence.lower() for kw in keywords):
-                return sentence[:200]
-        
-        return sentences[0][:200] if sentences else "Standard UI element"
+        return found if found else ["gray"]
