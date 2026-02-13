@@ -6,6 +6,7 @@ import re
 import os
 
 MODEL_NAME = "unsloth/Qwen2-VL-7B-Instruct-bnb-4bit"
+ELEMENTS_PER_IMAGE = 20  #  ADDED BACK
 
 class QwenProcessor:
     def __init__(self):
@@ -32,13 +33,12 @@ class QwenProcessor:
                     {"type": "image", "image": f"file://{image_path}"},
                     {
                         "type": "text",
-                        "text": "Describe all UI elements in this image. For each, give: type (button/link/input/text/image), bounding box <box>[[x1,y1,x2,y2]]</box>, and any visible text."
+                        "text": f"Describe all UI elements in this image. For each, give: type (button/link/input/text/image), bounding box <box>[[x1,y1,x2,y2]]</box>, and any visible text. Detect {ELEMENTS_PER_IMAGE} elements."  # ✅ USES VARIABLE
                     }
                 ]
             }
         ]
         
-        # Use the proper Qwen2-VL processing
         text = self.processor.apply_chat_template(
             messages,
             tokenize=False,
@@ -58,7 +58,7 @@ class QwenProcessor:
         with torch.no_grad():
             output_ids = self.model.generate(
                 **inputs,
-                max_new_tokens=1024,
+                max_new_tokens=2048,  # ✅ INCREASED for more elements
                 do_sample=False
             )
         
@@ -68,7 +68,7 @@ class QwenProcessor:
             clean_up_tokenization_spaces=False
         )[0]
         
-        # Extract just the assistant's response (after the prompt)
+        # Extract just the assistant's response
         if "assistant" in response:
             response = response.split("assistant")[-1].strip()
         
@@ -85,22 +85,30 @@ class QwenProcessor:
         }
     
     def _parse_response(self, response, img_w, img_h):
-        """Parse model response and extract elements"""
+        """Parse model response and extract elements - FIXED VERSION"""
         elements = []
         
-        # Find all bounding boxes
-        box_pattern = r'<box>\[\[(\d+),(\d+),(\d+),(\d+)\]\]</box>'
+        # FIXED: Allow spaces in coordinates
+        box_pattern = r'<box>\[\[(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\]\]</box>'
         boxes = re.findall(box_pattern, response)
         
         if not boxes:
-            print("WARNING: No bounding boxes detected")
-            return [self._empty_element() for _ in range(10)]
+            print(f"WARNING: No bounding boxes detected")
+            print(f"Response preview: {response[:300]}")
+            return [self._empty_element() for _ in range(ELEMENTS_PER_IMAGE)]  # ✅ USES VARIABLE
         
-        # Split by common separators
-        parts = re.split(r'\n+|\d+\.|Element \d+:', response)
-        parts = [p.strip() for p in parts if len(p.strip()) > 20]
+        print(f"✓ Found {len(boxes)} bounding boxes")
         
-        for i, box in enumerate(boxes[:10]):
+        # Split response into sections
+        element_sections = re.split(r'\n\d+\.\s+', response)
+        if len(element_sections) <= 1:
+            element_sections = re.split(r'\*\*[^*]+\*\*:', response)
+        if len(element_sections) <= 1:
+            element_sections = response.split('\n\n')
+        
+        element_sections = [s.strip() for s in element_sections if s.strip()]
+        
+        for i, box in enumerate(boxes[:ELEMENTS_PER_IMAGE]):  # ✅ USES VARIABLE
             x1, y1, x2, y2 = map(int, box)
             
             # Scale to actual image size
@@ -109,36 +117,55 @@ class QwenProcessor:
             real_x2 = int(x2 * img_w / 1000)
             real_y2 = int(y2 * img_h / 1000)
             
-            # Get surrounding context
-            context = parts[i] if i < len(parts) else ""
+            # Get context around this box
+            context = ""
+            if i < len(element_sections):
+                context = element_sections[i]
+            else:
+                box_str = f"[[{x1}, {y1}, {x2}, {y2}]]"
+                box_index = response.find(box_str)
+                if box_index != -1:
+                    start = max(0, box_index - 100)
+                    end = min(len(response), box_index + 200)
+                    context = response[start:end]
             
-            # Extract type
+            # Extract element type
             elem_type = "unknown"
-            for t in ['button', 'link', 'input', 'text', 'image', 'icon', 'checkbox', 'dropdown']:
-                if t in context.lower():
+            context_lower = context.lower()
+            for t in ['button', 'link', 'input', 'text', 'image', 'icon', 'checkbox', 'dropdown', 'menu']:
+                if f'type: {t}' in context_lower or f'**type**: {t}' in context_lower or t in context_lower.split('\n')[0]:
                     elem_type = t
                     break
             
             # Extract text content
             text_content = ""
-            # Look for quoted text
-            quotes = re.findall(r'["\']([^"\']+)["\']', context)
-            if quotes:
-                text_content = quotes[0]
-            else:
-                # Look for "Text:" or "says:" patterns
-                text_match = re.search(r'(?:text|says|labeled|shows):\s*(.+?)(?:\.|,|\n|$)', context, re.IGNORECASE)
+            text_patterns = [
+                r'[Tt]ext[:\s]+["\']([^"\']+)["\']',
+                r'[Tt]ext[:\s]+([^\n]+)',
+                r'["\']([^"\']{3,50})["\']'
+            ]
+            for pattern in text_patterns:
+                text_match = re.search(pattern, context)
                 if text_match:
                     text_content = text_match.group(1).strip()
+                    text_content = re.sub(r'^[:\-\s]+', '', text_content)
+                    if text_content and text_content.lower() not in ['none', 'null', 'n/a']:
+                        break
             
-            # Get description (first sentence)
-            sentences = re.split(r'[.!?]\s+', context)
-            description = sentences[0][:200] if sentences else "UI element"
+            # Get description
+            description = "UI element"
+            desc_match = re.search(r'(?:Type|Bounding Box)[^\n]+\n\s*[-\*]?\s*(.+?)(?:\n|$)', context, re.IGNORECASE)
+            if desc_match:
+                description = desc_match.group(1).strip()[:200]
+            elif context:
+                lines = [l.strip() for l in context.split('\n') if len(l.strip()) > 10]
+                if lines:
+                    description = lines[0][:200]
             
             # Extract colors
             colors = []
-            for color in ['red', 'blue', 'green', 'yellow', 'white', 'black', 'gray', 'orange', 'purple']:
-                if color in context.lower():
+            for color in ['red', 'blue', 'green', 'yellow', 'white', 'black', 'gray', 'orange', 'purple', 'pink']:
+                if color in context_lower and color not in colors:
                     colors.append(color)
             
             element = {
@@ -152,15 +179,16 @@ class QwenProcessor:
                 "text": text_content,
                 "description": description,
                 "color_palette": colors[:3] if colors else ["white", "black"],
-                "confidence": round(0.70 + (i * 0.02), 2)
+                "confidence": round(0.70 + (i * 0.01), 2)  #  ADJUSTED for 20 elements
             }
             elements.append(element)
+            print(f"  Element {i+1}: {elem_type} - '{text_content}' at ({real_x1},{real_y1})")
         
-        # Pad to 10
-        while len(elements) < 10:
+        # Pad to ELEMENTS_PER_IMAGE
+        while len(elements) < ELEMENTS_PER_IMAGE:  # ✅ USES VARIABLE
             elements.append(self._empty_element())
         
-        return elements[:10]
+        return elements[:ELEMENTS_PER_IMAGE]  # ✅ USES VARIABLE
     
     def _empty_element(self):
         return {
