@@ -33,17 +33,27 @@ class QwenProcessor:
                     {"type": "image", "image": f"file://{image_path}"},
                     {
                         "type": "text",
-                        "text": f"""Analyze this screenshot and list exactly {ELEMENTS_PER_IMAGE} distinct, interactive UI elements.
+                        "text": f"""Analyze this screenshot and identify exactly {ELEMENTS_PER_IMAGE} distinct, interactive UI elements.
 
-For each element provide:
-1. Type: (button/link/input/text/image/icon/menu/header/navigation/search/etc)
-2. Position: <box>[[x1,y1,x2,y2]]</box> in 1000x1000 coordinates
-3. Text: "exact visible text" in quotes (or empty "" if no text)
-4. Purpose: One clear sentence describing what this element does
-5. Colors: Main colors used (e.g., blue, white, red)
+For EACH element provide these 5 fields in order:
+1. Type: button|link|input|text|image|icon|menu|header|navigation|search
+2. Position: <box>[[x1,y1,x2,y2]]</box> in 1000x1000 normalized coordinates
+3. Text: "exact visible text content" in quotes (or "" if no text visible)
+4. Purpose: One clear sentence describing what this element does or displays
+5. Colors: List 1-3 main colors (e.g., blue, white, red)
 
-Focus on interactive elements users can click/type into. Avoid listing the same background element multiple times.
-List elements from top to bottom, left to right."""
+IMPORTANT:
+- Focus on interactive elements (buttons, links, inputs) users can click or type into
+- Avoid listing page backgrounds or decorative elements multiple times
+- The Purpose should be a functional description, not just repeating the text
+- List elements from top-left to bottom-right of the page
+
+Example format:
+Type: button
+Position: <box>[[100,200,300,250]]</box>
+Text: "Sign in"
+Purpose: Allows users to log into their account
+Colors: blue, white"""
                     }
                 ]
             }
@@ -169,29 +179,65 @@ List elements from top to bottom, left to right."""
             
             # EXTRACT DESCRIPTION
             description = "UI element"
-            # Remove type/text markers and get remaining content
-            desc_text = re.sub(r'\*\*[Tt]ype\*\*:\s*\w+', '', context_clean)
-            desc_text = re.sub(r'\*\*[Tt]ext\*\*:\s*[""\'"`].*?[""\'"`]', '', desc_text)
-            desc_text = re.sub(r'[""\'"`].*?[""\'"`]', '', desc_text)  # remove all quoted text
+            
+            # Remove type/text markers and quotes to get pure description
+            desc_text = context_clean
+            
+            # Remove structured labels (Type:, Text:, Position:, Colors:, Purpose:, etc.)
+            desc_text = re.sub(r'\*\*[Tt]ype\*\*:\s*\w+', '', desc_text)
             desc_text = re.sub(r'Type:\s*\w+', '', desc_text, flags=re.IGNORECASE)
-            desc_text = re.sub(r'\*\*[^*]+\*\*:', '', desc_text)  # remove **Label**: patterns
-            desc_text = desc_text.strip()
+            desc_text = re.sub(r'\*\*[Tt]ext\*\*:\s*[""\'"`].*?[""\'"`]', '', desc_text)
+            desc_text = re.sub(r'Text:\s*[""\'"`].*?[""\'"`]', '', desc_text, flags=re.IGNORECASE)
+            desc_text = re.sub(r'\*\*[Pp]osition\*\*:.*?(?=\*\*|$)', '', desc_text)
+            desc_text = re.sub(r'Position:.*?(?=Type:|Text:|Colors:|Purpose:|$)', '', desc_text, flags=re.IGNORECASE)
+            desc_text = re.sub(r'\*\*[Cc]olors?\*\*:.*?(?=\*\*|$)', '', desc_text)
+            desc_text = re.sub(r'Colors?:.*?(?=Type:|Text:|Purpose:|$|\d+)', '', desc_text, flags=re.IGNORECASE)
+            desc_text = re.sub(r'\*\*[Pp]urpose\*\*:', 'Purpose:', desc_text)  # Keep Purpose: marker
             
-            # Get first meaningful sentence (at least 15 chars)
-            sentences = re.split(r'[.!?]\s+', desc_text)
-            for sent in sentences:
-                sent = sent.strip()
-                if len(sent) >= 15:
-                    # Avoid meta-descriptions about the format
-                    skip_phrases = ['bounding box', 'type:', 'text:', 'visible text', 
-                                   'here is', 'the element', 'this is a', 'coordinates']
-                    if not any(phrase in sent.lower() for phrase in skip_phrases):
-                        description = sent[:200]
-                        break
+            # Remove any **Label**: patterns we haven't caught yet
+            desc_text = re.sub(r'\*\*[^*]+\*\*:', '', desc_text)
             
-            # If no good description found, use cleaned snippet
-            if description == "UI element" and len(desc_text) > 15:
-                description = desc_text[:200]
+            # Remove all quoted strings (already extracted as text)
+            desc_text = re.sub(r'[""\'"`][^""\'"`]{0,200}[""\'"`]', '', desc_text)
+            
+            # Clean up numbers at start (from numbering: "1. Element" -> "Element")
+            desc_text = re.sub(r'^\s*\d+\.?\s*', '', desc_text)
+            
+            # Clean whitespace
+            desc_text = ' '.join(desc_text.split()).strip()
+            
+            # Look for "Purpose:" specifically as it usually has the best description
+            purpose_match = re.search(r'Purpose:\s*(.+?)(?:\s+Type:|Text:|Colors?:|Position:|$)', desc_text, re.IGNORECASE)
+            if purpose_match:
+                description = purpose_match.group(1).strip()
+                # Clean up trailing period/comma
+                description = description.rstrip('.,').strip()
+            else:
+                # Get first meaningful sentence (at least 20 chars)
+                sentences = re.split(r'[.!?]\s+', desc_text)
+                for sent in sentences:
+                    sent = sent.strip()
+                    if len(sent) >= 20:
+                        # Avoid meta-descriptions about the format
+                        skip_phrases = ['bounding box', 'type:', 'text:', 'visible text', 
+                                       'here is', 'the element', 'this is a', 'coordinates',
+                                       'position:', 'colors:', 'color palette']
+                        if not any(phrase in sent.lower() for phrase in skip_phrases):
+                            description = sent[:200]
+                            break
+                
+                # If still no good description, use cleaned snippet
+                if description == "UI element" and len(desc_text) > 15:
+                    # Take first reasonable chunk
+                    description = desc_text[:200].rstrip('.,').strip()
+            
+            # Final cleanup
+            if description and description != "UI element":
+                # Capitalize first letter
+                description = description[0].upper() + description[1:] if len(description) > 1 else description
+                # Ensure it ends properly
+                if not description[-1] in '.!?':
+                    description = description + '.'
             
             # EXTRACT COLORS
             colors = []
@@ -245,10 +291,15 @@ List elements from top to bottom, left to right."""
             }
             elements.append(element)
             
-            # Print progress
-            text_preview = text_content[:25] if text_content else "<no text>"
-            desc_preview = description[:35] if description else "<no desc>"
-            print(f"  [{len(elements):2d}] {elem_type:12s} | '{text_preview:25s}' | {desc_preview:35s} | {colors}")
+            # Print progress with better formatting
+            text_preview = (text_content[:30] + '...') if len(text_content) > 30 else text_content
+            text_display = f"'{text_preview}'" if text_content else "<no text>"
+            
+            desc_preview = (description[:40] + '...') if len(description) > 40 else description
+            
+            color_display = ', '.join(colors[:3]) if colors else "none"
+            
+            print(f"  [{len(elements):2d}] {elem_type:12s} | {text_display:35s} | {desc_preview:45s} | [{color_display}]")
             
             # Stop once we have enough good elements
             if len(elements) >= ELEMENTS_PER_IMAGE:
