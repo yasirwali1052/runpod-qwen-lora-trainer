@@ -6,7 +6,7 @@ import time
 
 CONFIG_FILE = "config.json"
 API_URL = "https://api.runpod.io/graphql"
-CUSTOM_IMAGE = "yasirkhan1052/qwen-lora-pipeline-trainer"
+CUSTOM_IMAGE = "yasirkhan1052/qwen-lora-pipeline-trainer:latest"
 
 def save_config(api_key, gpu):
     with open(CONFIG_FILE, 'w') as f:

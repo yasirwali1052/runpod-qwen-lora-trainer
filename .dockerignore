@@ -1,17 +1,18 @@
 # Python
 __pycache__/
 *.py[cod]
+*.pyo
 venv/
 env/
+.Python
 
-# AI / Models
+# AI Models
 *.pt
 *.pth
 *.bin
 *.safetensors
 .cache/
 huggingface/
-outputs/
 checkpoints/
 
 # Data
@@ -22,11 +23,26 @@ logs/
 
 # Git
 .git/
+.gitignore
 
 # IDE
 .vscode/
 .idea/
+*.swp
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Docker
+.dockerignore
+Dockerfile
+
+# Config
+config.json
+*.json
+
+# Test images
+*.png
+*.jpg
+*.jpeg
