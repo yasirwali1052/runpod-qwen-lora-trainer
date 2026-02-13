@@ -1,16 +1,9 @@
-# Web Server
-fastapi
-uvicorn
-python-multipart
-
-# AI & Deep Learning
-torch
-torchvision
-transformers
+transformers>=4.46.0
 accelerate
 bitsandbytes
 qwen-vl-utils
-
-# Image Processing & Speed
-Pillow
-hf_transfer
+fastapi
+uvicorn[standard]
+pillow
+python-multipart
+numpy<2
