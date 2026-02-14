@@ -6,7 +6,7 @@ import re
 import os
 
 MODEL_NAME = "unsloth/Qwen2-VL-7B-Instruct-bnb-4bit"
-ELEMENTS_PER_IMAGE = 20
+ELEMENTS_PER_IMAGE = 15
 
 class QwenProcessor:
     def __init__(self):
