@@ -15,14 +15,12 @@
 
 ## Project Overview
 
-This project helps you:
 
-1. **Process screenshots** on powerful RunPod GPUs using Qwen2-VL AI model
+1. **Process screenshots** on powerful RunPod GPUs using Qwen-VL AI model
 2. **Extract UI elements** with bounding boxes and descriptions automatically
 3. **Review and approve** results manually on your computer
 4. **Fine-tune the model** with approved data to improve accuracy over time
 
-**No coding knowledge required** - just follow the steps below.
 
 ---
 
@@ -360,7 +358,7 @@ Open `data/output/` folder. You'll find JSON files with extracted information:
 
 ---
 
-## 🎓 LoRA Fine-Tuning
+## LoRA Fine-Tuning
 
 Fine-tuning makes the AI better at YOUR specific screenshots over time.
 
@@ -416,7 +414,7 @@ You'll see:
 
 ```
 ============================================================
-QWEN2-VL LoRA FINE-TUNING (CPU MODE)
+QWEN-VL LoRA FINE-TUNING (CPU MODE)
 ============================================================
 
 Initializing trainer...
