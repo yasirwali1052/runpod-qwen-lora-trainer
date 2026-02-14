@@ -46,3 +46,10 @@ config.json
 *.png
 *.jpg
 *.jpeg
+
+weights/
+*.pt
+*.pth
+*.bin
+*.safetensors
+checkpoints/

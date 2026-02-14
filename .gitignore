@@ -20,11 +20,22 @@ config.json
 # Ignore data folder
 data/
 
-# Docker files you don’t need in Git (optional)
+# Model weights and checkpoints
+weights/
+*.pt
+*.pth
+*.bin
+*.safetensors
+checkpoints/
+
+# Hugging Face cache
+.cache/
+huggingface/
+
+# Docker files you don't need in Git (optional)
 *.tar
 *.zip
 
 # System files
 .DS_Store
 Thumbs.db
-

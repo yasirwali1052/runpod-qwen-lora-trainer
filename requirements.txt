@@ -1,1 +1,9 @@
-requests
+torch
+transformers>=4.46.0
+peft
+bitsandbytes
+datasets
+accelerate
+pillow
+qwen-vl-utils
+trl
