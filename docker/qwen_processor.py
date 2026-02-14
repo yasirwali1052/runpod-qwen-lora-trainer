@@ -130,7 +130,7 @@ List them numbered 1 to {ELEMENTS_PER_IMAGE}."""
                 
             context = sections[i]
             
-            # 1. Extract Bounding Box - Qwen typically uses [y1, x1, y2, x2]
+            # 1. Extract Bounding Box - Qwen uses [y1, x1, y2, x2]
             box_match = re.search(r'<box>\[\[(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\]\]</box>', context)
             if not box_match:
                 elements.append(self._empty_element())
@@ -139,8 +139,10 @@ List them numbered 1 to {ELEMENTS_PER_IMAGE}."""
             y1, x1, y2, x2 = map(int, box_match.groups())
             
             # Scale coordinates to actual pixel values
-            rx1, ry1 = int(x1 * img_w / 1000), int(y1 * img_h / 1000)
-            rx2, ry2 = int(x2 * img_w / 1000), int(y2 * img_h / 1000)
+            rx1 = int(x1 * img_w / 1000)
+            ry1 = int(y1 * img_h / 1000)
+            rx2 = int(x2 * img_w / 1000)
+            ry2 = int(y2 * img_h / 1000)
 
             # 2. Extract Text - Looking for <text>Tags</text> or Text: "Value"
             text_val = ""
@@ -176,12 +178,7 @@ List them numbered 1 to {ELEMENTS_PER_IMAGE}."""
 
             elements.append({
                 "element_type": e_type,
-                "bounding_box": {
-                    "x": rx1,
-                    "y": ry1,
-                    "width": abs(rx2 - rx1),
-                    "height": abs(ry2 - ry1)
-                },
+                "bounding_box": {"x": rx1, "y": ry1, "width": abs(rx2 - rx1), "height": abs(ry2 - ry1)},
                 "text": text_val,
                 "description": desc[:150],
                 "confidence": round(0.70 + (i * 0.01), 2)
