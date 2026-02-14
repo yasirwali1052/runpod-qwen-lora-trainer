@@ -8,6 +8,9 @@ import os
 MODEL_NAME = "unsloth/Qwen2-VL-7B-Instruct-bnb-4bit"
 ELEMENTS_PER_IMAGE = 15
 
+# VALID ELEMENT TYPES - anything else gets rejected
+VALID_TYPES = {'button', 'link', 'input', 'text', 'image', 'icon', 'checkbox', 'dropdown', 'menu'}
+
 class QwenProcessor:
     def __init__(self):
         self.model = Qwen2VLForConditionalGeneration.from_pretrained(
@@ -33,7 +36,16 @@ class QwenProcessor:
                     {"type": "image", "image": f"file://{image_path}"},
                     {
                         "type": "text",
-                        "text": f"List {ELEMENTS_PER_IMAGE} UI elements. For each provide: Type, bounding box <box>[[x,y,x2,y2]]</box>, visible text in quotes, and brief description."
+                        "text": f"""Analyze this UI screenshot and identify exactly {ELEMENTS_PER_IMAGE} distinct user interface elements.
+
+For EACH element, provide:
+- Type: one of (button, link, input, text, image, icon, checkbox, dropdown, menu)
+- Bounding box: <box>[[x,y,x2,y2]]</box> where coordinates are 0-1000
+- Text: the visible text on the element (if any)
+- Description: brief description of appearance and function
+
+Format each element clearly with numbering (1., 2., 3., etc.).
+Detect {ELEMENTS_PER_IMAGE} elements total."""
                     }
                 ]
             }
@@ -81,41 +93,57 @@ class QwenProcessor:
             "elements": elements
         }
     
-    def _normalize_element_type(self, raw_type):
-        """Map model output to standard UI element types"""
+    def _validate_type(self, raw_type):
+        """Validate and normalize element type to only allowed values"""
+        raw_type = raw_type.lower().strip()
+        
+        # Remove any leading symbols or quotes
+        raw_type = re.sub(r'^[\*"\'\s]+', '', raw_type)
+        raw_type = re.sub(r'[\*"\'\s]+$', '', raw_type)
+        
+        # Direct mapping for common variations
         type_mapping = {
-            'navigation': 'menu',
-            'nav': 'menu',
-            'navbar': 'menu',
-            'search': 'input',
-            'searchbar': 'input',
-            'textfield': 'input',
-            'textarea': 'input',
-            'textbox': 'input',
+            'btn': 'button',
             'hyperlink': 'link',
             'anchor': 'link',
+            'textfield': 'input',
+            'textbox': 'input',
+            'search': 'input',
+            'searchbar': 'input',
             'img': 'image',
             'picture': 'image',
             'photo': 'image',
             'logo': 'image',
-            'icon': 'image',
-            'btn': 'button',
-            'cta': 'button',
-            'tab': 'button',
-            'toggle': 'checkbox',
-            'switch': 'checkbox',
+            'navigation': 'menu',
+            'nav': 'menu',
+            'navbar': 'menu',
             'select': 'dropdown',
             'picker': 'dropdown',
-            'selector': 'dropdown'
+            'toggle': 'checkbox',
+            'switch': 'checkbox'
         }
         
-        raw_type = raw_type.lower().strip()
-        return type_mapping.get(raw_type, raw_type)
+        # Try mapping first
+        if raw_type in type_mapping:
+            return type_mapping[raw_type]
+        
+        # Check if it's already valid
+        if raw_type in VALID_TYPES:
+            return raw_type
+        
+        # Try to find a valid type within the string
+        for valid_type in VALID_TYPES:
+            if valid_type in raw_type:
+                return valid_type
+        
+        # Default to button (most common)
+        return 'button'
     
     def _parse_response(self, response, img_w, img_h):
-        """Parser WITHOUT color extraction"""
+        """Strict parser with type validation"""
         elements = []
         
+        # Find all bounding boxes
         box_pattern = r'<box>\[\[(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\]\]</box>'
         boxes = re.findall(box_pattern, response)
         
@@ -125,50 +153,73 @@ class QwenProcessor:
         
         print(f"✓ Found {len(boxes)} boxes")
         
+        # Split by numbered sections
         sections = re.split(r'\n\s*\d+\.\s+', response)
         sections = [s.strip() for s in sections if s.strip()]
         
         for i, box in enumerate(boxes[:ELEMENTS_PER_IMAGE]):
             x1, y1, x2, y2 = map(int, box)
             
+            # Scale coordinates
             real_x1 = int(x1 * img_w / 1000)
             real_y1 = int(y1 * img_h / 1000)
             real_x2 = int(x2 * img_w / 1000)
             real_y2 = int(y2 * img_h / 1000)
             
+            # Get context for this element
             context = sections[i] if i < len(sections) else ""
             
-            # CLEAN context
-            context_clean = re.sub(r'<box>.*?</box>', '', context)
-            context_clean = re.sub(r'(?:\*\*)?[Tt]ype(?:\*\*)?:.*', '', context_clean)
-            context_clean = re.sub(r'(?:\*\*)?[Tt]ext(?:\*\*)?:.*', '', context_clean)
-            context_clean = re.sub(r'\*\*[Bb]ounding.*?\*\*:.*', '', context_clean)
-            context_clean = re.sub(r'Purpose:.*', '', context_clean)
-            context_clean = context_clean.strip()
+            # EXTRACT TYPE with strict validation
+            elem_type = 'button'  # default
+            type_patterns = [
+                r'[Tt]ype\s*[:=]\s*(\w+)',
+                r'^\s*(\w+)\s*:',  # First word followed by colon
+                r'^\s*\*\*(\w+)\*\*'  # **Type**
+            ]
             
-            # EXTRACT TYPE
-            elem_type = "unknown"
-            type_match = re.search(r'(?:\*\*)?[Tt]ype(?:\*\*)?:\s*(\w+)', context)
-            if type_match:
-                raw_type = type_match.group(1).lower()
-                elem_type = self._normalize_element_type(raw_type)
-            else:
-                first_word = context.split()[0].lower() if context.split() else ""
-                elem_type = self._normalize_element_type(first_word)
+            for pattern in type_patterns:
+                type_match = re.search(pattern, context)
+                if type_match:
+                    raw_type = type_match.group(1)
+                    elem_type = self._validate_type(raw_type)
+                    break
             
-            # EXTRACT TEXT
+            # EXTRACT TEXT - look for quoted strings
             text_content = ""
-            quote_matches = re.findall(r'["\']([^"\']{2,100})["\']', context)
-            if quote_matches:
-                text_content = max(quote_matches, key=len)
+            # Try multiple quote patterns
+            quote_patterns = [
+                r'[Tt]ext\s*[:=]\s*["\']([^"\']+)["\']',
+                r'["\']([^"\']{3,100})["\']'
+            ]
             
-            # EXTRACT DESCRIPTION
+            for pattern in quote_patterns:
+                quote_matches = re.findall(pattern, context)
+                if quote_matches:
+                    # Get the longest match (likely the actual text)
+                    text_content = max(quote_matches, key=len).strip()
+                    break
+            
+            # EXTRACT DESCRIPTION - clean version
             description = "UI element"
-            if context_clean and len(context_clean) > 10:
-                sentences = re.split(r'[.!]\s+', context_clean)
+            
+            # Remove all metadata lines
+            clean_context = context
+            clean_context = re.sub(r'<box>.*?</box>', '', clean_context)
+            clean_context = re.sub(r'[Tt]ype\s*[:=].*', '', clean_context)
+            clean_context = re.sub(r'[Tt]ext\s*[:=].*', '', clean_context)
+            clean_context = re.sub(r'\*\*[^*]+\*\*\s*[:=]', '', clean_context)  # Remove **Label**:
+            clean_context = re.sub(r'-\s*\n', '', clean_context)  # Remove list markers
+            clean_context = re.sub(r'\*\*[Vv]isible.*', '', clean_context)  # Remove **Visible
+            clean_context = re.sub(r'\*\*[Dd]escription.*?:', '', clean_context)  # Remove **Description**:
+            clean_context = clean_context.strip()
+            
+            # Get first meaningful sentence
+            if clean_context and len(clean_context) > 15:
+                sentences = re.split(r'[.!?]\s+', clean_context)
                 for sent in sentences:
                     sent = sent.strip()
-                    if len(sent) > 20 and not any(x in sent.lower() for x in ['here is', 'ui element', 'button', 'link']):
+                    # Skip very short or generic sentences
+                    if len(sent) > 15 and not any(x in sent.lower() for x in ['here is', 'visible text', 'description', 'bounding box']):
                         description = sent[:200]
                         break
             
@@ -186,8 +237,9 @@ class QwenProcessor:
             }
             elements.append(element)
             
-            print(f"  [{i+1}] {elem_type:8s} | '{text_content[:30]:30s}' | {description[:40]:40s}")
+            print(f"  [{i+1:2d}] {elem_type:8s} | '{text_content[:30]:30s}' | {description[:40]:40s}")
         
+        # Pad to ELEMENTS_PER_IMAGE
         while len(elements) < ELEMENTS_PER_IMAGE:
             elements.append(self._empty_element())
         
