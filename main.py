@@ -36,13 +36,13 @@ def get_available_gpus(api_key):
     result = graphql(api_key, query)
     return result.get('data', {}).get('gpuTypes', [])
 
-def create_pod(api_key, gpu_id, name, disk_gb):
+def create_pod(api_key, gpu_id, name, disk_gb, gpu_count=1):
     query = f"""
     mutation {{
         podFindAndDeployOnDemand(
             input: {{
                 cloudType: SECURE,
-                gpuCount: 1,
+                gpuCount: {int(gpu_count)},
                 volumeInGb: 0,
                 containerDiskInGb: {int(disk_gb)},
                 minVcpuCount: 2,
@@ -78,7 +78,7 @@ def create_pod(api_key, gpu_id, name, disk_gb):
         return None
     
     pod = result['data']['podFindAndDeployOnDemand']
-    log(f"Created pod {pod['id']}")
+    log(f"Created pod {pod['id']} with {gpu_count} GPU(s)")
     return pod
 
 def get_pods(api_key):
@@ -89,7 +89,8 @@ def get_pods(api_key):
                 name 
                 desiredStatus 
                 machine { 
-                    gpuDisplayName 
+                    gpuDisplayName
+                    gpuCount
                 }
                 runtime {
                     ports {
@@ -112,10 +113,8 @@ def get_pod_endpoint(api_key, pod_id):
     if not pod or not pod.get('runtime') or not pod['runtime'].get('ports'):
         return None
     
-    # Try to build proxy URL from pod_id
     for port in pod['runtime']['ports']:
         if port['privatePort'] == 8000:
-            # RunPod proxy format: https://{pod_id}-{port}.proxy.runpod.net
             return f"https://{pod_id}-8000.proxy.runpod.net"
     
     return None
@@ -172,16 +171,44 @@ def main():
             try:
                 gpu_index = int(input("\nSelect GPU number: ")) - 1
                 selected_gpu_id = gpus[gpu_index]['id']
+                selected_gpu_name = gpus[gpu_index]['displayName']
             except (ValueError, IndexError):
                 print("Invalid selection. Please try again.")
                 continue
 
+            # Ask for GPU count
+            print(f"\nSelected: {selected_gpu_name}")
+            gpu_count_input = input("How many GPUs? [1]: ").strip()
+            
+            if gpu_count_input:
+                try:
+                    gpu_count = int(gpu_count_input)
+                    if gpu_count < 1:
+                        print("GPU count must be at least 1. Using 1 GPU.")
+                        gpu_count = 1
+                except ValueError:
+                    print("Invalid number. Using 1 GPU.")
+                    gpu_count = 1
+            else:
+                gpu_count = 1
+            
+            # Confirm if multiple GPUs
+            if gpu_count > 1:
+                print(f"\nNote: {gpu_count}x {selected_gpu_name} will cost {gpu_count}x the hourly rate")
+                confirm = input("Continue? (y/n): ").strip().lower()
+                if confirm != 'y':
+                    print("Cancelled.")
+                    continue
+
             name = input("Pod name [Qwen-Worker]: ") or "Qwen-Worker"
             disk = input("Disk GB [50]: ") or "50"
             
-            pod = create_pod(api_key, selected_gpu_id, name, int(disk))
+            print(f"\nCreating pod with {gpu_count}x {selected_gpu_name}...")
+            pod = create_pod(api_key, selected_gpu_id, name, int(disk), gpu_count)
+            
             if pod:
                 print(f"\nPod created: {pod['id']}")
+                print(f"Configuration: {gpu_count}x {selected_gpu_name}")
                 print("Wait 5-10 minutes for model to download and load into VRAM")
         
         elif choice == "2":
@@ -190,8 +217,13 @@ def main():
             print("-" * 80)
             
             for p in pods:
-                gpu = p['machine']['gpuDisplayName'] if p.get('machine') else "INIT"
-                print(f"{p['id']:<18} {p['name']:<20} {p['desiredStatus']:<12} {gpu}")
+                gpu_info = p.get('machine', {})
+                gpu_name = gpu_info.get('gpuDisplayName', 'INIT')
+                gpu_count = gpu_info.get('gpuCount', 1)
+                
+                gpu_display = f"{gpu_count}x {gpu_name}" if gpu_count > 1 else gpu_name
+                
+                print(f"{p['id']:<18} {p['name']:<20} {p['desiredStatus']:<12} {gpu_display}")
                 
                 endpoint = get_pod_endpoint(api_key, p['id'])
                 if endpoint:
@@ -227,9 +259,12 @@ def main():
             
             print(f"Processing {len(image_files)} images via {endpoint}")
             
+            success_count = 0
+            fail_count = 0
+            
             for i, img_file in enumerate(image_files, 1):
                 img_path = os.path.join(input_folder, img_file)
-                print(f"[{i}/{len(image_files)}] {img_file}")
+                print(f"[{i}/{len(image_files)}] {img_file}", end=" ... ")
                 
                 try:
                     with open(img_path, 'rb') as f:
@@ -244,13 +279,19 @@ def main():
                         output_file = os.path.join(output_folder, f"{os.path.splitext(img_file)[0]}.json")
                         with open(output_file, 'w') as f:
                             json.dump(result, f, indent=2)
-                        print(f"   Saved: {output_file}")
+                        print("Done")
+                        success_count += 1
                     else:
-                        print(f"   Error: {response.status_code}")
+                        print(f"Error {response.status_code}")
+                        fail_count += 1
+                        
                 except Exception as e:
-                    print(f"   Failed: {str(e)}")
+                    print(f"Failed: {str(e)}")
+                    fail_count += 1
             
-            print(f"\nResults saved in {output_folder}/")
+            print(f"\n{'='*50}")
+            print(f"Results: {success_count} successful, {fail_count} failed")
+            print(f"Outputs saved in {output_folder}/")
         
         elif choice == "4":
             pod_id = input("Enter Pod ID: ")
@@ -258,7 +299,9 @@ def main():
         
         elif choice == "5":
             pod_id = input("Enter Pod ID: ")
-            terminate_pod(api_key, pod_id)
+            confirm = input(f"Are you sure you want to terminate pod {pod_id}? (y/n): ").strip().lower()
+            if confirm == 'y':
+                terminate_pod(api_key, pod_id)
         
         elif choice == "6":
             break
